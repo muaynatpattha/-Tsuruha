@@ -1,0 +1,6 @@
+{
+  "name": "E-Commerce Financial Dashboard",
+  "description": "แดชบอร์ดสรุปยอดขาย Shopee และ Lazada บันทึกและวิเคราะห์ยอดขาย ยอดยกเลิก (Void) ออเดอร์ พร้อมรายงานรายวัน รายเดือน และกราฟวิเคราะห์แนวโน้ม",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
