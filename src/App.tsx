@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   TrendingUp, 
+  TrendingDown,
   AlertCircle, 
   AlertTriangle,
   ShoppingBag, 
@@ -21,6 +22,7 @@ import {
   ChevronDown,
   LayoutGrid,
   CheckSquare,
+  Copy,
   Users,
   User as UserIcon,
   ShieldCheck,
@@ -43,7 +45,7 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import { Transaction, DashboardStats } from './types';
 import { INITIAL_TRANSACTIONS } from './initialData';
-import { computeStats, formatThaiDate, exportToCSV, exportToAppSheetCSV } from './utils';
+import { computeStats, formatThaiDate, exportToCSV, exportToAppSheetCSV, getLocalTimestamp } from './utils';
 // @ts-expect-error - Vite handles JPG imports natively, but TS lacks declaration
 import tsdcLogo from './assets/images/tsdc_logo_bright_blue_1783745223705.jpg';
 import { jsPDF } from 'jspdf';
@@ -62,39 +64,52 @@ import { User } from 'firebase/auth';
 
 export default function App() {
   // Load transactions from localStorage or default to initial simplified seeded data
+  const cleanTransactions = (list: Transaction[]): Transaction[] => {
+    return list.map((t: Transaction) => {
+      const cleanNote = [
+        'ยอดขายสินค้าไอทีแคมเปญหลัก',
+        'ออเดอร์หมวดหมู่เสื้อผ้าแฟชั่น',
+        'ยอดโอนสะสมรอบเที่ยงวัน',
+        'คำสั่งซื้อเครื่องเขียนและของใช้ในบ้าน',
+        'ยอดขายหมวดเครื่องสำอางแคมเปญพิเศษ',
+        'ยอดจำหน่ายของสะสมและโมเดลนำเข้า',
+        'คำสั่งซื้อสินค้าแคมเปญประจำเดือน 7.7',
+        'ยอดขาย Shopee ประจำวัน',
+        'ยอดขาย Lazada ประจำวัน',
+        'ยอดออเดอร์ปกติ Lazada',
+        'ลูกค้ายกเลิกสินค้าพรีออเดอร์',
+        'ยอดขายรายวันหมวดหมู่ต่างๆ'
+      ];
+      const randomNote = cleanNote[Math.floor(Math.random() * cleanNote.length)];
+      return {
+        ...t,
+        note: t.note ? t.note.trim() : randomNote
+      };
+    });
+  };
+
   const [transactions, setTransactions] = useState<Transaction[]>(() => {
-    const saved = localStorage.getItem('ecom_sales_transactions_v3');
-    if (saved) {
+    if (typeof window !== 'undefined') {
       try {
-        const parsed = JSON.parse(saved);
-        if (parsed && parsed.length > 0) {
-          // Clean up old mock notes for a clean user experience
-          return parsed.map((t: Transaction) => {
-            if (t.id.startsWith('TX-202607') || [
-              'ยอดขายสินค้าไอทีแคมเปญหลัก',
-              'ออเดอร์หมวดหมู่เสื้อผ้าแฟชั่น',
-              'ยอดโอนสะสมรอบเที่ยงวัน',
-              'คำสั่งซื้อเครื่องเขียนและของใช้ในบ้าน',
-              'ยอดขายหมวดเครื่องสำอางแคมเปญพิเศษ',
-              'ยอดจำหน่ายของสะสมและโมเดลนำเข้า',
-              'คำสั่งซื้อสินค้าแคมเปญประจำเดือน 7.7',
-              'ยอดขาย Shopee ประจำวัน',
-              'ยอดขาย Lazada ประจำวัน',
-              'ยอดออเดอร์ปกติ Lazada',
-              'ลูกค้ายกเลิกสินค้าพรีออเดอร์',
-              'ยอดขายรายวันหมวดหมู่สินค้าแฟชั่น',
-              'ยอดขายปกติ Lazada'
-            ].includes(t.note)) {
-              return { ...t, note: '' };
-            }
-            return t;
-          });
+        const saved = localStorage.getItem('ecom_sales_transactions_v3');
+        if (saved) {
+          let loaded = JSON.parse(saved);
+          const loadedIds = new Set(loaded.map(tx => tx.id));
+          const missingInit = INITIAL_TRANSACTIONS.filter(tx => !loadedIds.has(tx.id));
+          if (missingInit.length > 0) {
+            loaded = [...loaded, ...cleanTransactions(missingInit)];
+            loaded.sort((a, b) => {
+              if (b.date !== a.date) return b.date.localeCompare(a.date);
+              return b.id.localeCompare(a.id);
+            });
+          }
+          return loaded;
         }
       } catch (e) {
         console.error('Error parsing saved transactions:', e);
       }
     }
-    return INITIAL_TRANSACTIONS;
+    return cleanTransactions(INITIAL_TRANSACTIONS);
   });
 
   // Save transactions to localStorage
@@ -102,8 +117,8 @@ export default function App() {
     localStorage.setItem('ecom_sales_transactions_v3', JSON.stringify(transactions));
   }, [transactions]);
 
-  // View Mode: 'ledger' (Main detailed table) or 'analytics' (Summaries & Charts)
-  const [activeView, setActiveView] = useState<'ledger' | 'analytics'>('ledger');
+  // View Mode: 'ledger' (Main detailed table), 'analytics' (Summaries & Charts), or 'void' (Void tracking dashboard)
+  const [activeView, setActiveView] = useState<'ledger' | 'analytics' | 'void'>('ledger');
   const [activeTab, setActiveTab] = useState<'daily' | 'monthly' | 'charts'>('daily');
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [editingTransactionId, setEditingTransactionId] = useState<string | null>(null);
@@ -116,6 +131,7 @@ export default function App() {
   // Sync Success Modal States (for displaying a Google Sheets preview window after saving updates)
   const [isSyncSuccessModalOpen, setIsSyncSuccessModalOpen] = useState<boolean>(false);
   const [syncSuccessModalTx, setSyncSuccessModalTx] = useState<Transaction | null>(null);
+  const [syncSuccessAction, setSyncSuccessAction] = useState<'save' | 'delete'>('save');
   const [syncStatus, setSyncStatus] = useState<'syncing' | 'success' | 'offline_success' | 'failed'>('offline_success');
 
   // Search & Filter States
@@ -124,6 +140,8 @@ export default function App() {
   const [filterType, setFilterType] = useState<'all' | 'sale' | 'void'>('all');
   const [summaryStartDate, setSummaryStartDate] = useState<string>('');
   const [summaryEndDate, setSummaryEndDate] = useState<string>('');
+  const [voidStartDate, setVoidStartDate] = useState<string>('');
+  const [voidEndDate, setVoidEndDate] = useState<string>('');
   const [isVoidReasonsCollapsed, setIsVoidReasonsCollapsed] = useState<boolean>(false);
 
   // Simplified Single-Form State for Modal
@@ -132,10 +150,10 @@ export default function App() {
     platform: 'shopee' as 'shopee' | 'lazada',
     type: 'sale' as 'sale' | 'void',
     amount: '',
-    orders: '1',
-    items: '1',
+    orders: '',
+    items: '',
     note: '',
-    staffCode: ''
+    staffCode: 'Auehen'
   });
 
   // Google Sheets simulated connection state
@@ -171,23 +189,46 @@ export default function App() {
   const [isAdminManagerOpen, setIsAdminManagerOpen] = useState<boolean>(false);
   const [newAdminEmail, setNewAdminEmail] = useState<string>('');
 
-  // Manage employee codes for Admin & user input
-  const [employeeCodes, setEmployeeCodes] = useState<string[]>(() => {
+  // Manage user accounts for Authentication & individual logs
+  const [userAccounts, setUserAccounts] = useState<{ userCode: string; password: string; role: 'user' | 'admin' }[]>(() => {
     try {
-      const saved = localStorage.getItem('ecom_employee_codes');
-      return saved ? JSON.parse(saved) : ['EMP001', 'EMP002', 'EMP003'];
+      const saved = localStorage.getItem('ecom_user_accounts');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed && Array.isArray(parsed) && parsed.length > 0) {
+          return parsed;
+        }
+      }
     } catch (e) {
-      console.error('Error loading employee codes:', e);
-      return ['EMP001', 'EMP002', 'EMP003'];
+      console.error('Error loading user accounts:', e);
     }
+    return [
+      { userCode: 'Auehen', password: '1234', role: 'user' },
+      { userCode: 'CR-140575', password: '1234', role: 'user' },
+      { userCode: 'Admin', password: '1234', role: 'admin' },
+      { userCode: 'EMP001', password: '1234', role: 'user' }
+    ];
   });
 
   useEffect(() => {
-    localStorage.setItem('ecom_employee_codes', JSON.stringify(employeeCodes));
-  }, [employeeCodes]);
+    localStorage.setItem('ecom_user_accounts', JSON.stringify(userAccounts));
+  }, [userAccounts]);
+
+  const [loggedInUserCode, setLoggedInUserCode] = useState<string>(() => {
+    return localStorage.getItem('ecom_logged_in_user_code') || 'Auehen';
+  });
+
+  useEffect(() => {
+    localStorage.setItem('ecom_logged_in_user_code', loggedInUserCode);
+  }, [loggedInUserCode]);
 
   const [isEmployeeManagerOpen, setIsEmployeeManagerOpen] = useState<boolean>(false);
   const [newEmployeeCode, setNewEmployeeCode] = useState<string>('');
+  const [newEmployeePassword, setNewEmployeePassword] = useState<string>('1234');
+  const [newEmployeeRole, setNewEmployeeRole] = useState<'user' | 'admin'>('user');
+  const [confirmDeleteUserCode, setConfirmDeleteUserCode] = useState<string | null>(null);
+
+  const [selectedUserCode, setSelectedUserCode] = useState<string>('');
 
   // Real Google Sheets states
   const [currentUser, setCurrentUser] = useState<User | null>(null);
@@ -197,6 +238,7 @@ export default function App() {
   });
   const [isSyncingSheets, setIsSyncingSheets] = useState(false);
   const isLastSyncFromSheetRef = useRef<boolean>(false);
+  const lastLocalWriteTimeRef = useRef<number>(0);
   const [isPollingSheets, setIsPollingSheets] = useState<boolean>(false);
   const [isPrintingPDF, setIsPrintingPDF] = useState<boolean>(false);
 
@@ -278,17 +320,67 @@ export default function App() {
     return computeStats(summaryFilteredTransactions);
   }, [summaryFilteredTransactions]);
 
-  // Filter for void transactions that have a specified cause/reason
+  // Filter for void transactions with dedicated date range filtering
   const voidTransactionsWithNotes = useMemo(() => {
-    return summaryFilteredTransactions.filter(tx => tx.type === 'void' && tx.note && tx.note.trim() !== '');
-  }, [summaryFilteredTransactions]);
+    return transactions.filter(tx => {
+      if (tx.type !== 'void') return false;
+      if (voidStartDate && tx.date < voidStartDate) return false;
+      if (voidEndDate && tx.date > voidEndDate) return false;
+      return true;
+    });
+  }, [transactions, voidStartDate, voidEndDate]);
 
-  // Total voided/canceled orders from all filtered transactions
+  // Total voided/canceled orders from filtered void transactions
   const totalVoidOrders = useMemo(() => {
-    return summaryFilteredTransactions
-      .filter(tx => tx.type === 'void')
+    return transactions
+      .filter(tx => {
+        if (tx.type !== 'void') return false;
+        if (voidStartDate && tx.date < voidStartDate) return false;
+        if (voidEndDate && tx.date > voidEndDate) return false;
+        return true;
+      })
       .reduce((sum, tx) => sum + (Number(tx.orders) || 0), 0);
-  }, [summaryFilteredTransactions]);
+  }, [transactions, voidStartDate, voidEndDate]);
+
+  // Total voided/canceled amount from filtered void transactions
+  const totalVoidAmount = useMemo(() => {
+    return transactions
+      .filter(tx => {
+        if (tx.type !== 'void') return false;
+        if (voidStartDate && tx.date < voidStartDate) return false;
+        if (voidEndDate && tx.date > voidEndDate) return false;
+        return true;
+      })
+      .reduce((sum, tx) => sum + (Number(tx.amount) || 0), 0);
+  }, [transactions, voidStartDate, voidEndDate]);
+
+  // Helper to quickly apply date range presets for VOID transactions
+  const setVoidPresetRange = (rangeType: 'all' | '7days' | '30days') => {
+    if (rangeType === 'all') {
+      setVoidStartDate('');
+      setVoidEndDate('');
+      setToast({ message: 'แสดงรายงานการ Void สะสมทั้งหมดของระบบ', type: 'info' });
+      return;
+    }
+
+    const latestTx = [...transactions].filter(t => t.type === 'void').sort((a, b) => b.date.localeCompare(a.date))[0];
+    const anchorDateStr = latestTx ? latestTx.date : new Date().toISOString().split('T')[0];
+    
+    const anchor = new Date(anchorDateStr);
+    const start = new Date(anchor);
+
+    if (rangeType === '7days') {
+      start.setDate(anchor.getDate() - 6);
+      setVoidStartDate(start.toISOString().split('T')[0]);
+      setVoidEndDate(anchorDateStr);
+      setToast({ message: `แสดงรายงานการ Void ย้อนหลัง 7 วัน (${formatThaiDate(start.toISOString().split('T')[0])} - ${formatThaiDate(anchorDateStr)})`, type: 'success' });
+    } else if (rangeType === '30days') {
+      start.setDate(anchor.getDate() - 29);
+      setVoidStartDate(start.toISOString().split('T')[0]);
+      setVoidEndDate(anchorDateStr);
+      setToast({ message: `แสดงรายงานการ Void ย้อนหลัง 30 วัน (${formatThaiDate(start.toISOString().split('T')[0])} - ${formatThaiDate(anchorDateStr)})`, type: 'success' });
+    }
+  };
 
   // Helper to quickly apply date range presets (anchored to the latest transaction date)
   const setPresetRange = (rangeType: 'all' | '7days' | '30days') => {
@@ -333,10 +425,10 @@ export default function App() {
       platform: 'shopee',
       type: 'sale',
       amount: '',
-      orders: '1',
-      items: '1',
+      orders: '',
+      items: '',
       note: '',
-      staffCode: employeeCodes[0] || ''
+      staffCode: loggedInUserCode || 'Auehen'
     });
     setIsAddModalOpen(true);
   };
@@ -354,9 +446,9 @@ export default function App() {
       type: tx.type,
       amount: String(tx.amount),
       orders: String(tx.orders),
-      items: String(tx.items || tx.orders || 1),
+      items: String(tx.items !== undefined && !isNaN(tx.items) ? tx.items : 0),
       note: tx.note || '',
-      staffCode: tx.staffCode || employeeCodes[0] || ''
+      staffCode: tx.staffCode || loggedInUserCode || 'Auehen'
     });
     setIsAddModalOpen(true);
   };
@@ -386,20 +478,9 @@ export default function App() {
     }
   };
 
-  // Helper when changing platform/type in form to auto-adjust smart values
+  // Helper when changing platform/type in form to auto-adjust values
   const handleFormChange = (updates: Partial<typeof formData>) => {
-    setFormData(prev => {
-      const next = { ...prev, ...updates };
-      
-      if (updates.type) {
-        if (updates.type === 'sale') {
-          next.orders = prev.orders === '0' || prev.orders === '' ? '1' : prev.orders;
-        } else if (updates.type === 'void') {
-          next.orders = prev.orders === '0' || prev.orders === '' ? '1' : prev.orders;
-        }
-      }
-      return next;
-    });
+    setFormData(prev => ({ ...prev, ...updates }));
   };
 
   // Process and save new or edited simplified transaction
@@ -410,25 +491,25 @@ export default function App() {
       return;
     }
 
-    const amountNum = parseFloat(formData.amount);
-    const ordersNum = parseInt(formData.orders, 10);
-    const itemsNum = parseInt(formData.items, 10);
+    const amountNum = formData.amount ? parseFloat(formData.amount) : 0;
+    const ordersNum = formData.orders ? parseInt(formData.orders, 10) : 0;
+    const itemsNum = formData.items ? parseInt(formData.items, 10) : 0;
 
-    if (isNaN(amountNum) || amountNum <= 0) {
-      setToast({ message: 'กรุณากรอกจำนวนเงินให้ถูกต้อง และมากกว่า 0 บาท', type: 'error' });
-      return;
+    let txDate = formData.date;
+    if (!txDate) {
+      const today = new Date();
+      const yyyy = today.getFullYear();
+      const mm = String(today.getMonth() + 1).padStart(2, '0');
+      const dd = String(today.getDate()).padStart(2, '0');
+      txDate = `${yyyy}-${mm}-${dd}`;
     }
-
-    const txDate = formData.date;
     isLastSyncFromSheetRef.current = false;
-
-    if (employeeCodes.length > 0 && !formData.staffCode) {
-      setToast({ message: 'กรุณาเลือกรหัสพนักงานผู้คีย์ข้อมูล', type: 'error' });
-      return;
-    }
+    lastLocalWriteTimeRef.current = Date.now();
 
     let updatedTx: Transaction;
     let nextTransactions: Transaction[];
+    const currentTimestamp = getLocalTimestamp();
+    const activeUserCode = loggedInUserCode || 'Auehen';
 
     if (editingTransactionId) {
       // Edit mode
@@ -438,10 +519,11 @@ export default function App() {
         platform: formData.platform,
         type: formData.type,
         amount: amountNum,
-        orders: isNaN(ordersNum) ? (formData.type === 'sale' ? 1 : 0) : ordersNum,
-        items: isNaN(itemsNum) ? (formData.type === 'sale' ? 1 : 0) : itemsNum,
+        orders: isNaN(ordersNum) ? 0 : ordersNum,
+        items: isNaN(itemsNum) ? 0 : itemsNum,
         note: formData.note.trim(),
-        staffCode: formData.staffCode
+        staffCode: activeUserCode,
+        timestamp: currentTimestamp
       };
       
       nextTransactions = transactions.map(tx => tx.id === editingTransactionId ? updatedTx : tx);
@@ -462,10 +544,11 @@ export default function App() {
         platform: formData.platform,
         type: formData.type,
         amount: amountNum,
-        orders: isNaN(ordersNum) ? (formData.type === 'sale' ? 1 : 0) : ordersNum,
-        items: isNaN(itemsNum) ? (formData.type === 'sale' ? 1 : 0) : itemsNum,
+        orders: isNaN(ordersNum) ? 0 : ordersNum,
+        items: isNaN(itemsNum) ? 0 : itemsNum,
         note: formData.note.trim(),
-        staffCode: formData.staffCode
+        staffCode: activeUserCode,
+        timestamp: currentTimestamp
       };
 
       nextTransactions = [updatedTx, ...transactions];
@@ -475,9 +558,10 @@ export default function App() {
       setToast({ message: 'บันทึกยอดขายใหม่เรียบร้อยแล้ว!', type: 'success' });
     }
 
-    // Open Google Sheets sync preview window immediately!
+    // Save states but do NOT open the Google Sheets sync preview window!
+    setSyncSuccessAction('save');
     setSyncSuccessModalTx(updatedTx);
-    setIsSyncSuccessModalOpen(true);
+    // setIsSyncSuccessModalOpen(true); // Disabled popup to prevent user distraction
 
     if (sheetConnection === 'connected' && googleAccessToken && currentUser) {
       setSyncStatus('syncing');
@@ -504,9 +588,34 @@ export default function App() {
     }
     if (deleteTargetId) {
       isLastSyncFromSheetRef.current = false;
-      setTransactions(prev => prev.filter(tx => tx.id !== deleteTargetId));
+      lastLocalWriteTimeRef.current = Date.now();
+      const targetTx = transactions.find(tx => tx.id === deleteTargetId);
+      const nextTransactions = transactions.filter(tx => tx.id !== deleteTargetId);
+      setTransactions(nextTransactions);
       setToast({ message: `ลบรายการ ${deleteTargetId} เรียบร้อยแล้ว`, type: 'info' });
       setDeleteTargetId(null);
+
+      if (targetTx) {
+        setSyncSuccessAction('delete');
+        setSyncSuccessModalTx(targetTx);
+        // setIsSyncSuccessModalOpen(true); // Disabled popup to prevent user distraction
+
+        if (sheetConnection === 'connected' && googleAccessToken && currentUser) {
+          setSyncStatus('syncing');
+          handleRealSync(googleAccessToken, currentUser, nextTransactions).then((spreadsheetIdResult) => {
+            if (spreadsheetIdResult) {
+              setSyncStatus('success');
+            } else {
+              setSyncStatus('failed');
+            }
+          }).catch((err) => {
+            console.error('Background sync failed on delete:', err);
+            setSyncStatus('failed');
+          });
+        } else {
+          setSyncStatus('offline_success');
+        }
+      }
     }
   };
 
@@ -579,6 +688,7 @@ export default function App() {
   const handleRequestAccess = (action: 'sync' | 'open_sheet' | 'switch_to_admin') => {
     setPendingAction(action);
     setEnteredPassword('');
+    setSelectedUserCode('');
     setIsPasswordModalOpen(true);
   };
 
@@ -586,44 +696,46 @@ export default function App() {
   const handleVerifyPassword = (e: React.FormEvent) => {
     e.preventDefault();
     const inputVal = enteredPassword.trim();
-    const isAdminEmail = adminEmails.some(email => email.toLowerCase() === inputVal.toLowerCase());
+    const account = userAccounts.find(acc => acc.userCode.toLowerCase() === selectedUserCode.toLowerCase());
 
-    if (isAdminEmail) {
-      setIsPasswordModalOpen(false);
-      setPendingAction(null);
-      setUserRole('admin');
-      localStorage.setItem('ecom_user_role', 'admin');
-      setToast({ message: '👑 ปลดล็อกสิทธิ์แอดมินสำเร็จ! ยินดีต้อนรับสู่ระบบผู้ดูแลระบบ', type: 'success' });
-      return;
-    }
+    if (account) {
+      if (account.password === inputVal) {
+        setIsPasswordModalOpen(false);
+        setLoggedInUserCode(account.userCode);
+        setUserRole(account.role);
+        localStorage.setItem('ecom_user_role', account.role);
+        localStorage.setItem('ecom_logged_in_user_code', account.userCode);
 
-    if (inputVal === appSheetPassword) {
-      setIsPasswordModalOpen(false);
-      
-      const actionToRun = pendingAction;
-      setPendingAction(null);
-      
-      // Execute the pending action
-      if (actionToRun === 'sync') {
-        setToast({ message: 'ยืนยันรหัสผ่านถูกต้อง เรียบร้อย!', type: 'success' });
-        handleSyncAndOpenSheetsDirect();
-      } else if (actionToRun === 'open_sheet' && spreadsheetId) {
-        setToast({ message: 'ยืนยันรหัสผ่านถูกต้อง เรียบร้อย!', type: 'success' });
-        window.open(`https://docs.google.com/spreadsheets/d/${spreadsheetId}`, '_blank');
-      } else if (actionToRun === 'switch_to_admin') {
-        setUserRole('user');
-        localStorage.setItem('ecom_user_role', 'user');
-        setToast({ message: '🔓 ปลดล็อกสิทธิ์สำเร็จ! ยินดีต้อนรับสู่สถานะผู้ใช้งานทั่วไป (บันทึก/แก้ไขรายการ)', type: 'success' });
+        const actionToRun = pendingAction;
+        setPendingAction(null);
+
+        // Execute the pending action
+        if (actionToRun === 'sync') {
+          setToast({ message: `🔓 เข้าสู่ระบบคุณ ${account.userCode} สำเร็จ! กำลังซิงค์ข้อมูล...`, type: 'success' });
+          handleSyncAndOpenSheetsDirect();
+        } else if (actionToRun === 'open_sheet' && spreadsheetId) {
+          setToast({ message: `🔓 เข้าสู่ระบบคุณ ${account.userCode} สำเร็จ! กำลังเปิด Google Sheets...`, type: 'success' });
+          window.open(`https://docs.google.com/spreadsheets/d/${spreadsheetId}`, '_blank');
+        } else {
+          setToast({ message: `🔓 ยินดีต้อนรับคุณ ${account.userCode}! เข้าสู่ระบบด้วยสิทธิ์${account.role === 'admin' ? 'ผู้ดูแลระบบ' : 'ผู้ใช้งานทั่วไป'}`, type: 'success' });
+        }
+      } else {
+        setToast({ message: 'รหัสผ่านไม่ถูกต้อง กรุณาลองใหม่อีกครั้ง', type: 'error' });
       }
     } else {
-      setToast({ message: 'รหัสผ่านไม่ถูกต้อง กรุณาลองใหม่อีกครั้ง', type: 'error' });
+      setToast({ message: 'ไม่พบผู้ใช้นี้ในระบบ', type: 'error' });
     }
   };
 
   // 3. Password Changing Handler
   const handleSaveNewPassword = (e: React.FormEvent) => {
     e.preventDefault();
-    if (currentPasswordConfirm !== appSheetPassword) {
+    const account = userAccounts.find(acc => acc.userCode.toLowerCase() === selectedUserCode.toLowerCase());
+    if (!account) {
+      setToast({ message: 'ไม่พบผู้ใช้นี้ในระบบ', type: 'error' });
+      return;
+    }
+    if (currentPasswordConfirm !== account.password) {
       setToast({ message: 'รหัสผ่านปัจจุบันไม่ถูกต้อง กรุณากรอกรหัสผ่านปัจจุบันให้ถูกต้อง', type: 'error' });
       return;
     }
@@ -631,12 +743,19 @@ export default function App() {
       setToast({ message: 'กรุณากรอกรหัสผ่านใหม่', type: 'error' });
       return;
     }
-    localStorage.setItem('ecom_appsheet_password', newPasswordValue);
-    setAppSheetPassword(newPasswordValue);
+
+    const updatedAccounts = userAccounts.map(acc => {
+      if (acc.userCode.toLowerCase() === selectedUserCode.toLowerCase()) {
+        return { ...acc, password: newPasswordValue.trim() };
+      }
+      return acc;
+    });
+
+    setUserAccounts(updatedAccounts);
     setIsChangingPassword(false);
     setCurrentPasswordConfirm('');
     setNewPasswordValue('');
-    setToast({ message: `เปลี่ยนรหัสผ่านสำเร็จ! รหัสผ่านใหม่ของคุณคือ: ${newPasswordValue}`, type: 'success' });
+    setToast({ message: `เปลี่ยนรหัสผ่านสำเร็จ! รหัสผ่านใหม่ของ ${selectedUserCode} คือ: ${newPasswordValue.trim()}`, type: 'success' });
   };
 
   // Synchronize with Google Sheets and immediately open it in a new tab for AppSheet integration
@@ -745,12 +864,17 @@ export default function App() {
     for (let i = 0; i < sortedA.length; i++) {
       const a = sortedA[i];
       const b = sortedB[i];
+      const itemA = a.items !== undefined && !isNaN(a.items) ? a.items : 0;
+      const itemB = b.items !== undefined && !isNaN(b.items) ? b.items : 0;
+      
       if (
         a.date !== b.date ||
         a.platform !== b.platform ||
         a.type !== b.type ||
         a.amount !== b.amount ||
         a.orders !== b.orders ||
+        itemA !== itemB ||
+        (a.staffCode || '') !== (b.staffCode || '') ||
         (a.note || '') !== (b.note || '')
       ) {
         return false;
@@ -769,8 +893,8 @@ export default function App() {
     let active = true;
 
     const pollGoogleSheets = async () => {
-      // Don't poll if we are actively writing or tab is not focused
-      if (isSyncingSheets || document.visibilityState !== 'visible') {
+      // Don't poll if we are actively writing, tab is not focused, or if we performed a local write recently (allow 15 seconds for Google Sheets propagation)
+      if (isSyncingSheets || document.visibilityState !== 'visible' || (Date.now() - lastLocalWriteTimeRef.current < 15000)) {
         return;
       }
 
@@ -780,12 +904,19 @@ export default function App() {
         if (!active) return;
 
         if (fetched) {
-          const isSame = areTransactionListsEqual(transactions, fetched);
-          if (!isSame) {
-            console.log('Detected Google Sheets modifications, updating dashboard...');
-            isLastSyncFromSheetRef.current = true;
-            setTransactions(fetched);
-            setToast({ message: '🔄 อัปเดตข้อมูลแบบเรียลไลม์จาก Google Sheets เรียบร้อย!', type: 'success' });
+          if (fetched.length === 0 && transactions.length > 0) {
+            // Google Sheets is empty, but we have local transactions.
+            // Avoid wiping out local data, sync local transactions UP to Google Sheets!
+            console.log('Google Sheets is empty. Syncing local transactions up to prevent data loss...');
+            handleRealSync(googleAccessToken, currentUser, transactions);
+          } else {
+            const isSame = areTransactionListsEqual(transactions, fetched);
+            if (!isSame) {
+              console.log('Detected Google Sheets modifications, updating dashboard...');
+              isLastSyncFromSheetRef.current = true;
+              setTransactions(fetched);
+              setToast({ message: '🔄 อัปเดตข้อมูลแบบเรียลไทม์จาก Google Sheets เรียบร้อย!', type: 'success' });
+            }
           }
         }
       } catch (e: any) {
@@ -844,7 +975,8 @@ export default function App() {
 
   // Export ledger to CSV format
   const handleExportCSV = () => {
-    const csvContent = exportToCSV(filteredTransactions);
+    const hideStaffCode = userRole !== 'admin';
+    const csvContent = exportToCSV(filteredTransactions, hideStaffCode);
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -858,7 +990,8 @@ export default function App() {
 
   // Export ledger specifically formatted for AppSheet and Google Sheets (clean raw UTF-8 CSV with English column headers)
   const handleExportAppSheetCSV = () => {
-    const csvContent = exportToAppSheetCSV(filteredTransactions);
+    const hideStaffCode = userRole !== 'admin';
+    const csvContent = exportToAppSheetCSV(filteredTransactions, hideStaffCode);
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -868,6 +1001,36 @@ export default function App() {
     link.click();
     document.body.removeChild(link);
     setToast({ message: `ส่งออกไฟล์สำหรับ Google Sheets เรียบร้อย (รวม ${filteredTransactions.length} รายการ)`, type: 'success' });
+  };
+
+  // Copy daily summary report to clipboard for chat channels
+  const handleCopyDailySummary = (row: any) => {
+    try {
+      const text = `📋 สรุปยอดขายรายวัน ประจำวันที่ ${formatThaiDate(row.date)}
+━━━━━━━━━━━━━━━━━━━━━━━━
+💰 ยอดสุทธิรวม 2 แพลตฟอร์ม: ฿${row.totalNet.toLocaleString('th-TH')}
+📦 ออเดอร์รวม: ${row.totalOrders.toLocaleString('th-TH')} รายการ
+🛒 จำนวนชิ้นรวม: ${row.totalItems.toLocaleString('th-TH')} ชิ้น
+
+แยกตามแพลตฟอร์ม:
+🟧 Shopee (ส้ม)
+- ยอดสุทธิ: ฿${row.shopeeNet.toLocaleString('th-TH')}
+- จำนวนออเดอร์: ${row.shopeeOrders.toLocaleString('th-TH')} ออเดอร์
+- จำนวนชิ้น: ${row.shopeeItems.toLocaleString('th-TH')} ชิ้น
+
+🟦 Lazada (น้ำเงิน)
+- ยอดสุทธิ: ฿${row.lazadaNet.toLocaleString('th-TH')}
+- จำนวนออเดอร์: ${row.lazadaOrders.toLocaleString('th-TH')} ออเดอร์
+- จำนวนชิ้น: ${row.lazadaItems.toLocaleString('th-TH')} ชิ้น
+
+❌ ยอดหัก Void/ยกเลิก รวม: ฿${(row.shopeeVoid + row.lazadaVoid).toLocaleString('th-TH')}`;
+
+      navigator.clipboard.writeText(text);
+      setToast({ message: `📋 คัดลอกสรุปยอดขายวันที่ ${formatThaiDate(row.date)} สำเร็จ!`, type: 'success' });
+    } catch (err) {
+      console.error('Clipboard copy error:', err);
+      setToast({ message: 'ไม่สามารถคัดลอกไปยังคลิปบอร์ดได้', type: 'error' });
+    }
   };
 
   // Helper to get formatted date range for the PDF report header
@@ -953,20 +1116,22 @@ export default function App() {
 
   // Group transactions daily
   const dailyReport = useMemo(() => {
-    const groups: { [key: string]: { shopeeSales: number; shopeeVoid: number; shopeeOrders: number; lazadaSales: number; lazadaVoid: number; lazadaOrders: number; totalNet: number } } = {};
+    const groups: { [key: string]: { shopeeSales: number; shopeeVoid: number; shopeeOrders: number; shopeeItems: number; lazadaSales: number; lazadaVoid: number; lazadaOrders: number; lazadaItems: number; totalNet: number } } = {};
     
     summaryFilteredTransactions.forEach(tx => {
       const date = tx.date;
       if (!groups[date]) {
-        groups[date] = { shopeeSales: 0, shopeeVoid: 0, shopeeOrders: 0, lazadaSales: 0, lazadaVoid: 0, lazadaOrders: 0, totalNet: 0 };
+        groups[date] = { shopeeSales: 0, shopeeVoid: 0, shopeeOrders: 0, shopeeItems: 0, lazadaSales: 0, lazadaVoid: 0, lazadaOrders: 0, lazadaItems: 0, totalNet: 0 };
       }
 
       const amount = Number(tx.amount) || 0;
       const orders = Number(tx.orders) || 0;
+      const items = Number(tx.items) || 0;
       if (tx.platform === 'shopee') {
         if (tx.type === 'sale') {
           groups[date].shopeeSales += amount;
           groups[date].shopeeOrders += orders;
+          groups[date].shopeeItems += items;
         } else if (tx.type === 'void') {
           groups[date].shopeeVoid += amount;
         }
@@ -974,6 +1139,7 @@ export default function App() {
         if (tx.type === 'sale') {
           groups[date].lazadaSales += amount;
           groups[date].lazadaOrders += orders;
+          groups[date].lazadaItems += items;
         } else if (tx.type === 'void') {
           groups[date].lazadaVoid += amount;
         }
@@ -991,12 +1157,15 @@ export default function App() {
           shopeeVoid: item.shopeeVoid,
           shopeeNet,
           shopeeOrders: item.shopeeOrders,
+          shopeeItems: item.shopeeItems,
           lazadaSales: item.lazadaSales,
           lazadaVoid: item.lazadaVoid,
           lazadaNet,
           lazadaOrders: item.lazadaOrders,
+          lazadaItems: item.lazadaItems,
           totalNet: shopeeNet + lazadaNet,
-          totalOrders: item.shopeeOrders + item.lazadaOrders
+          totalOrders: item.shopeeOrders + item.lazadaOrders,
+          totalItems: item.shopeeItems + item.lazadaItems
         };
       })
       .sort((a, b) => b.date.localeCompare(a.date));
@@ -1162,12 +1331,11 @@ export default function App() {
               <UserIcon className="w-4.5 h-4.5 text-slate-300" />
             </div>
             <div>
-              <span className="text-[13px] font-extrabold text-slate-200 block">⚡ แพลตฟอร์มผู้ใช้งานทั่วไป (User Workspace)</span>
-              <span className="text-[10px] text-slate-400 font-semibold block mt-0.5">คุณได้รับสิทธิ์: สามารถบันทึกยอดขายใหม่, แก้ไขรายการ และลบรายการได้ (ไม่มีสิทธิ์จัดการ Google Sheets)</span>
+              <span className="text-[13px] font-extrabold text-slate-200 block">⚡ แพลตฟอร์มผู้ใช้งานทั่วไป (User Workspace) - บัญชี: {loggedInUserCode || 'Auehen'}</span>
             </div>
           </div>
           
-          <div className="flex flex-wrap items-center gap-3">
+          <div className="flex flex-wrap items-center justify-end gap-3 ml-auto">
             <button
               onClick={() => {
                 setUserRole('visitor');
@@ -1189,12 +1357,12 @@ export default function App() {
               <ShieldCheck className="w-4.5 h-4.5 text-indigo-400 animate-bounce" />
             </div>
             <div>
-              <span className="text-[13px] font-extrabold text-indigo-200 block">👑 แพลตฟอร์มผู้ดูแลระบบ (Admin Workspace)</span>
+              <span className="text-[13px] font-extrabold text-indigo-200 block">👑 แพลตฟอร์มผู้ดูแลระบบ (Admin Workspace) - บัญชี: {loggedInUserCode || 'Auehen'}</span>
               <span className="text-[10px] text-indigo-300 font-semibold block mt-0.5">คุณได้รับสิทธิ์เข้าถึงทั้งหมด: สามารถบันทึกยอดขายใหม่, แก้ไขรายการ, ลบรายการ และควบคุมการซิงค์ข้อมูลลงแผ่นงาน Google Sheets</span>
             </div>
           </div>
           
-          <div className="flex flex-wrap items-center gap-3">
+          <div className="flex flex-wrap items-center justify-end gap-3 ml-auto">
             {/* Google Sheets status button for Admin */}
             {sheetConnection === 'connected' && spreadsheetId ? (
               <div className="flex items-center gap-2 bg-emerald-600 text-white px-3 py-1.5 rounded-xl text-xs border border-emerald-500 shadow-sm">
@@ -1210,7 +1378,18 @@ export default function App() {
                   </span>
                 </span>
                 <button 
-                  onClick={() => handleRequestAccess('open_sheet')}
+                  onClick={() => {
+                    if (userRole === 'admin') {
+                      if (spreadsheetId) {
+                        setToast({ message: '🔄 กำลังเปิด Google Sheets...', type: 'success' });
+                        window.open(`https://docs.google.com/spreadsheets/d/${spreadsheetId}`, '_blank');
+                      } else {
+                        setToast({ message: '⚠️ ไม่พบ Spreadsheet ID', type: 'error' });
+                      }
+                    } else {
+                      handleRequestAccess('open_sheet');
+                    }
+                  }}
                   className="ml-1 hover:underline text-xs text-emerald-100 font-bold flex items-center gap-0.5 bg-transparent border-none cursor-pointer"
                 >
                   <ExternalLink className="w-3 h-3" />
@@ -1249,7 +1428,7 @@ export default function App() {
               className="px-3.5 py-1.5 bg-indigo-850 hover:bg-indigo-800 text-indigo-100 hover:text-white rounded-xl font-bold transition-all shadow-xs flex items-center gap-1.5 cursor-pointer active:scale-95 text-xs border border-indigo-700"
             >
               <UserPlus className="w-3.5 h-3.5 text-indigo-300" />
-              <span>จัดการรหัสพนักงาน 👥</span>
+              <span>จัดการบัญชีผู้ใช้งาน 👥</span>
             </button>
 
             <button
@@ -1302,10 +1481,10 @@ export default function App() {
             <span className="hidden md:inline">{showKpiCards ? 'ซ่อนสรุปย่อ' : 'แสดงสรุปย่อ'}</span>
           </button>
 
-          <div className="bg-slate-100 p-1 rounded-lg flex items-center">
+          <div className="bg-slate-100 p-1 rounded-lg flex items-center gap-1">
             <button
               onClick={() => setActiveView('ledger')}
-              className={`px-3 py-1 text-xs font-bold rounded-md transition-all ${
+              className={`px-3 py-1 text-xs font-bold rounded-md transition-all cursor-pointer ${
                 activeView === 'ledger' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-800'
               }`}
             >
@@ -1313,11 +1492,19 @@ export default function App() {
             </button>
             <button
               onClick={() => setActiveView('analytics')}
-              className={`px-3 py-1 text-xs font-bold rounded-md transition-all ${
+              className={`px-3 py-1 text-xs font-bold rounded-md transition-all cursor-pointer ${
                 activeView === 'analytics' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-800'
               }`}
             >
               รายงานสรุป & กราฟ
+            </button>
+            <button
+              onClick={() => setActiveView('void')}
+              className={`px-3 py-1 text-xs font-bold rounded-md transition-all cursor-pointer ${
+                activeView === 'void' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-800'
+              }`}
+            >
+              🚫 ติดตามการ Void
             </button>
           </div>
 
@@ -1448,136 +1635,6 @@ export default function App() {
           )}
         </AnimatePresence>
 
-        {/* VOID REASONS BULLETIN BOARD */}
-        <div className="bg-white border border-slate-200/80 rounded-2xl shadow-xs overflow-hidden">
-          {/* Header */}
-          <div 
-            onClick={() => setIsVoidReasonsCollapsed(!isVoidReasonsCollapsed)}
-            className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 p-5 border-b border-slate-100 bg-slate-50/20 hover:bg-slate-50/60 cursor-pointer select-none transition-all duration-200"
-          >
-            <div className="flex items-center gap-2">
-              <div className="w-8 h-8 rounded-lg bg-rose-50 text-rose-500 flex items-center justify-center border border-rose-100 flex-shrink-0">
-                <AlertTriangle className="w-4.5 h-4.5 stroke-[2.2px]" />
-              </div>
-              <div>
-                <div className="flex items-center gap-2 flex-wrap">
-                  <h4 className="font-extrabold text-slate-800 text-xs uppercase tracking-wider">กระดานติดตามสาเหตุการ Void (Void Reasons Dashboard)</h4>
-                  {voidTransactionsWithNotes.length > 0 && (
-                    <span className="text-[10px] font-extrabold px-2 py-0.5 bg-rose-100 border border-rose-200 text-rose-700 rounded-full animate-pulse">
-                      แจ้ง {voidTransactionsWithNotes.length} สาเหตุ
-                    </span>
-                  )}
-                </div>
-                <p className="text-[10px] text-slate-400 font-semibold mt-0.5">รวมสาเหตุและเหตุผลจากการยกเลิกและ Void รายการขายของระบบ</p>
-              </div>
-            </div>
-
-            <div className="flex items-center gap-3 self-start sm:self-center">
-              <span className="text-[10px] font-extrabold px-2.5 py-1 bg-slate-100 border border-slate-200 text-slate-600 rounded-full">
-                Void รวม: ฿{stats.voidAmount.toLocaleString('th-TH')} ({totalVoidOrders} ออเดอร์)
-              </span>
-              <button 
-                type="button"
-                onClick={() => setIsVoidReasonsCollapsed(!isVoidReasonsCollapsed)}
-                className="w-7 h-7 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-500 hover:text-slate-700 flex items-center justify-center border border-slate-200 transition-all cursor-pointer"
-                title={isVoidReasonsCollapsed ? "คลิกเพื่อแสดงสาเหตุการ Void" : "คลิกเพื่อพับเก็บสาเหตุการ Void"}
-              >
-                <ChevronDown className={`w-4 h-4 transition-transform duration-300 ${isVoidReasonsCollapsed ? '' : 'rotate-180'}`} />
-              </button>
-            </div>
-          </div>
-
-          <AnimatePresence initial={false}>
-            {!isVoidReasonsCollapsed && (
-              <motion.div
-                initial={{ height: 0, opacity: 0 }}
-                animate={{ height: 'auto', opacity: 1 }}
-                exit={{ height: 0, opacity: 0 }}
-                transition={{ duration: 0.25, ease: 'easeInOut' }}
-                className="overflow-hidden"
-              >
-                <div className="p-5 pt-0 space-y-4">
-                  <div className="h-4"></div>
-                  {voidTransactionsWithNotes.length === 0 ? (
-                    <div className="flex flex-col items-center justify-center py-6 text-center bg-slate-50/50 rounded-xl border border-dashed border-slate-100">
-                      <div className="w-10 h-10 rounded-full bg-slate-100 text-slate-400 flex items-center justify-center mb-2">
-                        <Info className="w-5 h-5" />
-                      </div>
-                      <p className="text-xs font-bold text-slate-600">ไม่มีประวัติการ Void ที่ระบุสาเหตุในช่วงเวลาที่เลือก</p>
-                      <p className="text-[10px] text-slate-400 font-semibold mt-1">
-                        {stats.voidAmount > 0 
-                          ? "💡 มีบางรายการถูก Void แต่ยังไม่มีการระบุสาเหตุเพิ่มเติมในช่องหมายเหตุ" 
-                          : "🎉 ยอดเยี่ยม! ไม่พบรายการถูกยกเลิก (Void) ในช่วงเวลานี้"}
-                      </p>
-                    </div>
-                  ) : (
-                    <div className="overflow-x-auto max-h-[300px] overflow-y-auto pr-1">
-                      <table className="w-full text-left border-collapse min-w-[600px]">
-                        <thead className="sticky top-0 bg-white z-10">
-                          <tr className="border-b border-slate-100 text-[10px] font-extrabold text-slate-400 uppercase tracking-wider bg-white">
-                            <th className="py-2.5 px-3">วันที่</th>
-                            <th className="py-2.5 px-3 w-[120px]">ช่องทาง</th>
-                            <th className="py-2.5 px-3 w-[120px]">รหัสรายการ</th>
-                            <th className="py-2.5 px-3">สาเหตุ / เหตุผลการ Void</th>
-                            <th className="py-2.5 px-3 text-center w-[120px]">ออเดอร์ที่ยกเลิก</th>
-                            <th className="py-2.5 px-3 text-right w-[140px]">จำนวนเงิน Void</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-100/60">
-                          {voidTransactionsWithNotes.map((tx) => {
-                            const isShopee = tx.platform === 'shopee';
-                            return (
-                              <tr key={tx.id} className="hover:bg-slate-50/40 transition-colors">
-                                <td className="py-3 px-3">
-                                  <span className="text-[11px] font-extrabold text-slate-500 bg-slate-100 px-2.5 py-1 rounded-lg">
-                                    {formatThaiDate(tx.date)}
-                                  </span>
-                                </td>
-                                <td className="py-3 px-3">
-                                  <div className="flex items-center gap-1.5">
-                                    <span 
-                                      className="w-4.5 h-4.5 rounded-md flex items-center justify-center text-[10px] font-extrabold"
-                                      style={{ backgroundColor: `${isShopee ? shopeeColor : lazadaColor}12`, color: isShopee ? shopeeColor : lazadaColor }}
-                                    >
-                                      {isShopee ? 'S' : 'L'}
-                                    </span>
-                                    <span className="text-xs font-bold text-slate-700">
-                                      {isShopee ? 'Shopee' : 'Lazada'}
-                                    </span>
-                                  </div>
-                                </td>
-                                <td className="py-3 px-3">
-                                  <span className="text-xs font-bold text-slate-400 font-mono">{tx.id}</span>
-                                </td>
-                                <td className="py-3 px-3">
-                                  <div className="bg-rose-50/60 border border-rose-100/40 px-3 py-1.5 rounded-xl inline-block max-w-full">
-                                    <span className="text-xs font-extrabold text-rose-700 leading-relaxed whitespace-pre-wrap">
-                                      💬 {tx.note}
-                                    </span>
-                                  </div>
-                                </td>
-                                <td className="py-3 px-3 text-center">
-                                  <span className="text-xs font-extrabold text-rose-600 bg-rose-50/80 border border-rose-100/40 px-2.5 py-1 rounded-lg font-mono">
-                                    {tx.orders || 0} ออเดอร์
-                                  </span>
-                                </td>
-                                <td className="py-3 px-3 text-right">
-                                  <span className="text-xs font-extrabold text-rose-500">
-                                    -฿{tx.amount.toLocaleString('th-TH')}
-                                  </span>
-                                </td>
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
-                </div>
-              </motion.div>
-            )}
-          </AnimatePresence>
-        </div>
 
         {/* VIEW 1: DETAILED TRANSACTION LEDGER TABLE */}
         {activeView === 'ledger' && (
@@ -1704,7 +1761,6 @@ export default function App() {
                     <th className="p-4 w-[160px]">วันที่</th>
                     <th className="p-4 w-[150px]">แพลตฟอร์ม</th>
                     <th className="p-4">รายละเอียดการทำรายการ</th>
-                    <th className="p-4 w-[130px] text-center">รหัสพนักงาน</th>
                     <th className="p-4 w-[110px] text-center">ออเดอร์</th>
                     <th className="p-4 w-[110px] text-center">จำนวนชิ้น</th>
                     <th className="p-4 w-[140px] text-right">จำนวนเงิน</th>
@@ -1714,7 +1770,7 @@ export default function App() {
                 <tbody className="divide-y divide-slate-100">
                   {filteredTransactions.length === 0 ? (
                     <tr>
-                      <td colSpan={8} className="text-center p-16 text-slate-400 font-medium">
+                      <td colSpan={7} className="text-center p-16 text-slate-400 font-medium">
                         ไม่พบรายการตามที่ระบุในตัวกรอง หรือไม่มีข้อมูลเหลืออยู่
                       </td>
                     </tr>
@@ -1778,17 +1834,6 @@ export default function App() {
                             </div>
                           </td>
 
-                          {/* 3.5 รหัสพนักงาน (Staff Code) */}
-                          <td className="p-4 border-b border-slate-100 text-center">
-                            {tx.staffCode ? (
-                              <span className="bg-indigo-50 border border-indigo-100/60 px-2.5 py-1 rounded-lg text-xs font-extrabold text-indigo-700 font-mono">
-                                {tx.staffCode}
-                              </span>
-                            ) : (
-                              <span className="text-slate-400 text-[11px] font-semibold italic">ไม่ระบุ</span>
-                            )}
-                          </td>
-
                           {/* 4. ออเดอร์ (Orders) */}
                           <td className="p-4 border-b border-slate-100 text-center font-extrabold text-slate-700">
                             {tx.orders > 0 ? `${tx.orders}` : '-'}
@@ -1796,7 +1841,7 @@ export default function App() {
 
                           {/* 4.5 จำนวนชิ้น (Items) */}
                           <td className="p-4 border-b border-slate-100 text-center font-extrabold text-slate-700">
-                            {(tx.items !== undefined ? tx.items : tx.orders) > 0 ? `${tx.items !== undefined ? tx.items : tx.orders}` : '-'}
+                            {tx.items !== undefined && tx.items > 0 ? `${tx.items}` : '-'}
                           </td>
 
                           {/* 5. จำนวนเงิน (Amount) */}
@@ -2053,12 +2098,13 @@ export default function App() {
                               <th className="p-3 text-center">ออเดอร์รวม (รายการ)</th>
                               <th className="p-3 text-center">สัดส่วนรายละเอียดแพลตฟอร์ม</th>
                               <th className="p-3 text-right">ยอดตัดหัก Void (฿)</th>
+                              <th className="p-3 text-center">คัดลอกสรุป</th>
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-slate-50 font-medium text-slate-600">
                             {dailyReport.length === 0 ? (
                               <tr>
-                                <td colSpan={5} className="text-center p-8 text-slate-400">ไม่มีสถิติสะสมรายวัน</td>
+                                <td colSpan={6} className="text-center p-8 text-slate-400">ไม่มีสถิติสะสมรายวัน</td>
                               </tr>
                             ) : (
                               dailyReport.map(row => (
@@ -2075,6 +2121,16 @@ export default function App() {
                                     <span style={{ color: lazadaColor }}>Lazada: ฿{row.lazadaNet.toLocaleString('th-TH')}</span>
                                   </td>
                                   <td className="p-3 text-right text-rose-500 font-bold">฿{(row.shopeeVoid + row.lazadaVoid).toLocaleString('th-TH')}</td>
+                                  <td className="p-3 text-center">
+                                    <button
+                                      onClick={() => handleCopyDailySummary(row)}
+                                      className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-bold text-slate-700 bg-slate-100 hover:bg-emerald-50 hover:text-emerald-700 hover:border-emerald-200 border border-slate-200 rounded-lg active:scale-95 transition-all cursor-pointer"
+                                      title="คัดลอกสรุปยอดขายสำหรับส่งรายงานแชท"
+                                    >
+                                      <Copy className="w-3 h-3 text-emerald-600" />
+                                      <span>คัดลอกสรุป</span>
+                                    </button>
+                                  </td>
                                 </tr>
                               ))
                             )}
@@ -2305,6 +2361,315 @@ export default function App() {
           </div>
         )}
 
+        {/* VIEW 3: DEDICATED VOID TRACKING TAB */}
+        {activeView === 'void' && (
+          <div className="space-y-6 animate-fade-in">
+            
+            {/* Title & Description Header Block */}
+            <div className="bg-white border border-slate-200/80 p-6 rounded-2xl shadow-2xs">
+              <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-rose-50 text-rose-500 flex items-center justify-center border border-rose-100 flex-shrink-0">
+                    <AlertTriangle className="w-5 h-5 stroke-[2.2px]" />
+                  </div>
+                  <div>
+                    <h3 className="text-lg font-extrabold text-slate-800 tracking-tight">
+                      กระดานติดตามและวิเคราะห์สาเหตุการ Void (Void Tracking Dashboard)
+                    </h3>
+                    <p className="text-[11px] text-slate-400 font-medium">
+                      วิเคราะห์รายละเอียดและเหตุผลของการยกเลิกรายการขาย (Void) ทั้ง Shopee และ Lazada พร้อมตัวกรองเวลาโดยเฉพาะ
+                    </p>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Elegant Report Date Range Filter Panel (Void Specific) */}
+            <div className={`p-5 rounded-2xl border ${themeStyles.card} shadow-2xs space-y-4`}>
+              <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                <div className="flex items-center gap-2">
+                  <div className="w-8 h-8 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center border border-indigo-100 flex-shrink-0">
+                    <Calendar className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h4 className="font-extrabold text-slate-800 text-xs uppercase tracking-wider">เลือกกรองช่วงเวลาประวัติการ Void</h4>
+                    <p className="text-[10px] text-slate-400 font-semibold mt-0.5">ค้นหาหรือระบุช่วงวันที่ต้องการสืบค้นหาสาเหตุการยกเลิก</p>
+                  </div>
+                </div>
+
+                {/* Preset Ranges */}
+                <div className="flex flex-wrap items-center gap-1.5 self-start lg:self-center">
+                  <span className="text-[10px] font-bold text-slate-400 mr-1.5 hidden sm:inline">ช่วงเวลาด่วน:</span>
+                  <button
+                    type="button"
+                    onClick={() => setVoidPresetRange('all')}
+                    className={`px-3 py-1.5 rounded-lg text-[11px] font-extrabold border transition-all cursor-pointer ${
+                      !voidStartDate && !voidEndDate
+                        ? 'bg-indigo-600 text-white border-indigo-600 shadow-xs'
+                        : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
+                    }`}
+                  >
+                    ทั้งหมด
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setVoidPresetRange('7days')}
+                    className={`px-3 py-1.5 rounded-lg text-[11px] font-extrabold border transition-all cursor-pointer ${
+                      voidStartDate && voidEndDate && (new Date(voidEndDate).getTime() - new Date(voidStartDate).getTime() <= 7 * 24 * 60 * 60 * 1000)
+                        ? 'bg-indigo-600 text-white border-indigo-600 shadow-xs'
+                        : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
+                    }`}
+                  >
+                    ย้อนหลัง 7 วัน
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setVoidPresetRange('30days')}
+                    className={`px-3 py-1.5 rounded-lg text-[11px] font-extrabold border transition-all cursor-pointer ${
+                      voidStartDate && voidEndDate && (new Date(voidEndDate).getTime() - new Date(voidStartDate).getTime() > 7 * 24 * 60 * 60 * 1000)
+                        ? 'bg-indigo-600 text-white border-indigo-600 shadow-xs'
+                        : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
+                    }`}
+                  >
+                    ย้อนหลัง 30 วัน
+                  </button>
+                </div>
+              </div>
+
+              <div className="h-[1px] bg-slate-100 w-full" />
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4 items-end">
+                <div className="space-y-1.5">
+                  <label className="text-[10px] font-extrabold text-slate-400 uppercase tracking-wider block">ตั้งแต่วันที่</label>
+                  <input
+                    type="date"
+                    value={voidStartDate}
+                    onChange={e => {
+                      setVoidStartDate(e.target.value);
+                      setToast({ message: `เปลี่ยนวันที่เริ่มการ Void เป็น ${formatThaiDate(e.target.value)}`, type: 'info' });
+                    }}
+                    className="w-full pl-3 pr-3 py-2.5 text-xs font-extrabold text-slate-700 bg-slate-50/50 hover:bg-slate-50 border border-slate-200 rounded-xl outline-none focus:bg-white focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 transition-all cursor-pointer"
+                  />
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-[10px] font-extrabold text-slate-400 uppercase tracking-wider block">ถึงวันที่</label>
+                  <input
+                    type="date"
+                    value={voidEndDate}
+                    onChange={e => {
+                      setVoidEndDate(e.target.value);
+                      setToast({ message: `เปลี่ยนวันที่สิ้นสุดการ Void เป็น ${formatThaiDate(e.target.value)}`, type: 'info' });
+                    }}
+                    className="w-full pl-3 pr-3 py-2.5 text-xs font-extrabold text-slate-700 bg-slate-50/50 hover:bg-slate-50 border border-slate-200 rounded-xl outline-none focus:bg-white focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 transition-all cursor-pointer"
+                  />
+                </div>
+
+                <div className="flex gap-2">
+                  {(voidStartDate || voidEndDate) && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setVoidStartDate('');
+                        setVoidEndDate('');
+                        setToast({ message: 'ล้างตัวกรองวันที่ Void เรียบร้อยแล้ว', type: 'info' });
+                      }}
+                      className="px-4 py-2.5 text-xs font-bold text-slate-500 hover:text-slate-800 hover:bg-slate-100 border border-slate-200 rounded-xl transition-all cursor-pointer flex-1 flex items-center justify-center gap-1.5 h-[42px]"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                      <span>ล้างค่า</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Custom KPI Cards for Current Filtered Period */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
+              {/* Card 1: Total Voided Amount */}
+              <div className={`p-5 rounded-2xl border ${themeStyles.card} relative overflow-hidden group hover:shadow-md transition-all duration-300`}>
+                <div className="absolute top-0 right-0 p-3 text-rose-100/30 group-hover:scale-110 transition-transform duration-300 pointer-events-none">
+                  <AlertTriangle className="w-16 h-16 stroke-[1px]" />
+                </div>
+                <div className="relative space-y-2">
+                  <div className="flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-rose-500 animate-pulse" />
+                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">ยอดเงินที่ถูก Void รวม</span>
+                  </div>
+                  <div className="flex items-baseline gap-1">
+                    <span className="text-2xl font-black text-rose-600 tracking-tight">฿{totalVoidAmount.toLocaleString('th-TH')}</span>
+                  </div>
+                  <p className="text-[10px] text-slate-400 font-semibold">ยอดรวมความเสียหายที่พบในช่วงเวลาที่เลือก</p>
+                </div>
+              </div>
+
+              {/* Card 2: Total Voided Orders */}
+              <div className={`p-5 rounded-2xl border ${themeStyles.card} relative overflow-hidden group hover:shadow-md transition-all duration-300`}>
+                <div className="absolute top-0 right-0 p-3 text-rose-100/30 group-hover:scale-110 transition-transform duration-300 pointer-events-none">
+                  <ShoppingBag className="w-16 h-16 stroke-[1px]" />
+                </div>
+                <div className="relative space-y-2">
+                  <div className="flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-rose-400" />
+                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">จำนวนออเดอร์ที่ยกเลิก</span>
+                  </div>
+                  <div className="flex items-baseline gap-1">
+                    <span className="text-2xl font-black text-slate-700 tracking-tight">{totalVoidOrders}</span>
+                    <span className="text-xs font-extrabold text-slate-400">ออเดอร์</span>
+                  </div>
+                  <p className="text-[10px] text-slate-400 font-semibold">ปริมาณจำนวนกล่อง/คำสั่งซื้อที่ทำการ Void</p>
+                </div>
+              </div>
+
+              {/* Card 3: Total Reported Reasons */}
+              <div className={`p-5 rounded-2xl border ${themeStyles.card} relative overflow-hidden group hover:shadow-md transition-all duration-300`}>
+                <div className="absolute top-0 right-0 p-3 text-indigo-100/30 group-hover:scale-110 transition-transform duration-300 pointer-events-none">
+                  <Tag className="w-16 h-16 stroke-[1px]" />
+                </div>
+                <div className="relative space-y-2">
+                  <div className="flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-indigo-500" />
+                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">จำนวนรายการระบุเหตุผล</span>
+                  </div>
+                  <div className="flex items-baseline gap-1">
+                    <span className="text-2xl font-black text-indigo-600 tracking-tight">
+                      {voidTransactionsWithNotes.filter(tx => tx.note && tx.note.trim() !== '').length}
+                    </span>
+                    <span className="text-xs font-extrabold text-slate-400">/ {voidTransactionsWithNotes.length} รายการ</span>
+                  </div>
+                  <p className="text-[10px] text-slate-400 font-semibold">รายการที่มีบันทึกระบุสาเหตุการ Void</p>
+                </div>
+              </div>
+            </div>
+
+            {/* The Detailed Void Transactions Table with Control Instruments */}
+            <div className={`${themeStyles.card} border rounded-2xl shadow-xs overflow-hidden`}>
+              {/* Header */}
+              <div className={`p-5 border-b ${themeStyles.border} ${themeStyles.bgMuted} flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2`}>
+                <div className="flex items-center gap-2">
+                  <div className="w-8 h-8 rounded-lg bg-rose-50 text-rose-500 flex items-center justify-center border border-rose-100 flex-shrink-0">
+                    <AlertTriangle className="w-4.5 h-4.5 stroke-[2.2px]" />
+                  </div>
+                  <div>
+                    <h4 className="font-extrabold text-slate-800 text-xs uppercase tracking-wider">ตารางตรวจสอบสาเหตุและข้อมูลการ Void</h4>
+                    <p className="text-[10px] text-slate-400 font-semibold mt-0.5">ค้นหาและวิเคราะห์สาเหตุการแก้ไขหรือถอนรายการธุรกรรม</p>
+                  </div>
+                </div>
+                <span className="text-[10px] font-extrabold px-3 py-1 bg-white border border-slate-200 text-slate-600 rounded-full shadow-3xs self-start sm:self-center">
+                  กรองพบทั้งหมด {voidTransactionsWithNotes.length} รายการ
+                </span>
+              </div>
+
+              <div className="p-5 pt-0 space-y-4">
+                <div className="h-1"></div>
+                {voidTransactionsWithNotes.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center py-12 text-center bg-slate-50/50 rounded-2xl border border-dashed border-slate-100">
+                    <div className="w-12 h-12 rounded-full bg-slate-100 text-slate-400 flex items-center justify-center mb-3">
+                      <Info className="w-6 h-6" />
+                    </div>
+                    <p className="text-xs font-bold text-slate-600">ไม่มีประวัติการ Void ในช่วงเวลาที่เลือก</p>
+                    <p className="text-[10px] text-slate-400 font-semibold mt-1">
+                      {totalVoidAmount > 0 
+                        ? "💡 มีบางรายการถูก Void แต่ยังไม่มีการระบุสาเหตุเพิ่มเติมในช่องหมายเหตุ" 
+                        : "🎉 ยอดเยี่ยม! ไม่พบรายการถูกยกเลิก (Void) ในช่วงเวลานี้เลย"}
+                    </p>
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto max-h-[500px] overflow-y-auto pr-1">
+                    <table className="w-full text-left border-collapse min-w-[700px]">
+                      <thead className="sticky top-0 bg-white z-10">
+                        <tr className="border-b border-slate-100 text-[10px] font-extrabold text-slate-400 uppercase tracking-wider bg-white">
+                          <th className="py-3 px-3">วันที่ทำรายการ</th>
+                          <th className="py-3 px-3 w-[120px]">ช่องทาง</th>
+                          <th className="py-3 px-3">สาเหตุ / เหตุผลหลักการ Void</th>
+                          <th className="py-3 px-3 text-center w-[120px]">จำนวนที่ยกเลิก</th>
+                          <th className="py-3 px-3 text-right w-[140px]">จำนวนเงินรวม</th>
+                          <th className="py-3 px-3 text-center w-[120px]">จัดการ</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100/60">
+                        {voidTransactionsWithNotes.map((tx) => {
+                          const isShopee = tx.platform === 'shopee';
+                          return (
+                            <tr key={tx.id} className="hover:bg-slate-50/40 transition-colors">
+                              <td className="py-3 px-3">
+                                <span className="text-[11px] font-extrabold text-slate-500 bg-slate-100 px-2.5 py-1 rounded-lg">
+                                  {formatThaiDate(tx.date)}
+                                </span>
+                              </td>
+                              <td className="py-3 px-3">
+                                <div className="flex items-center gap-1.5">
+                                  <span 
+                                    className="w-4.5 h-4.5 rounded-md flex items-center justify-center text-[10px] font-extrabold"
+                                    style={{ backgroundColor: `${isShopee ? shopeeColor : lazadaColor}12`, color: isShopee ? shopeeColor : lazadaColor }}
+                                  >
+                                    {isShopee ? 'S' : 'L'}
+                                  </span>
+                                  <span className="text-xs font-bold text-slate-700">
+                                    {isShopee ? 'Shopee' : 'Lazada'}
+                                  </span>
+                                </div>
+                              </td>
+                              <td className="py-3 px-3">
+                                {tx.note && tx.note.trim() !== '' ? (
+                                  <div className="bg-rose-50/60 border border-rose-100/40 px-3 py-1.5 rounded-xl inline-block max-w-full">
+                                    <span className="text-xs font-extrabold text-rose-700 leading-relaxed whitespace-pre-wrap">
+                                      💬 {tx.note}
+                                    </span>
+                                  </div>
+                                ) : (
+                                  <div className="bg-slate-100 border border-slate-200/60 px-3 py-1.5 rounded-xl inline-block max-w-full">
+                                    <span className="text-xs font-extrabold text-slate-400 leading-relaxed whitespace-pre-wrap">
+                                      ไม่ได้ระบุสาเหตุ
+                                    </span>
+                                  </div>
+                                )}
+                              </td>
+                              <td className="py-3 px-3 text-center">
+                                <span className="text-xs font-extrabold text-rose-600 bg-rose-50/80 border border-rose-100/40 px-2.5 py-1 rounded-lg font-mono">
+                                  {tx.orders || 0} ออเดอร์
+                                </span>
+                              </td>
+                              <td className="py-3 px-3 text-right">
+                                <span className="text-xs font-extrabold text-rose-500 font-mono">
+                                  -฿{tx.amount.toLocaleString('th-TH')}
+                                </span>
+                              </td>
+                              <td className="py-3 px-3 text-center">
+                                <div className="flex items-center justify-center gap-1.5">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleOpenEditModal(tx)}
+                                    className="p-1.5 bg-slate-50 hover:bg-slate-100 border border-slate-200 hover:border-indigo-200 text-slate-500 hover:text-indigo-600 rounded-lg transition-all cursor-pointer"
+                                    title="แก้ไขข้อมูลรายการ Void"
+                                  >
+                                    <Pencil className="w-3.5 h-3.5" />
+                                  </button>
+                                  {userRole === 'admin' && (
+                                    <button
+                                      type="button"
+                                      onClick={() => setDeleteTargetId(tx.id)}
+                                      className="p-1.5 bg-slate-50 hover:bg-rose-50 border border-slate-200 hover:border-rose-200 text-slate-400 hover:text-rose-600 rounded-lg transition-all cursor-pointer"
+                                      title="ลบข้อมูลรายการ Void"
+                                    >
+                                      <Trash2 className="w-3.5 h-3.5" />
+                                    </button>
+                                  )}
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </div>
+
+          </div>
+        )}
+
 
 
       </main>
@@ -2374,7 +2739,6 @@ export default function App() {
                       type="date"
                       value={formData.date}
                       onChange={e => handleFormChange({ date: e.target.value })}
-                      required
                       className={`w-full px-3.5 py-2.5 bg-slate-50 border border-slate-100 rounded-xl outline-none transition-all font-medium text-slate-700 ${
                         formData.platform === 'shopee' ? 'focus:bg-white focus:border-[#F53D2D]' : 'focus:bg-white focus:border-[#2563EB]'
                       }`}
@@ -2419,8 +2783,10 @@ export default function App() {
                     <input 
                       type="number"
                       step="any"
-                      required
                       placeholder="0.00"
+                      name="tx_amount_value"
+                      id="tx_amount_value"
+                      autoComplete="off"
                       value={formData.amount}
                       onChange={e => handleFormChange({ amount: e.target.value })}
                       className={`w-full px-3.5 py-2.5 bg-slate-50 border border-slate-100 rounded-xl outline-none transition-all font-bold text-slate-800 ${
@@ -2442,8 +2808,10 @@ export default function App() {
                     <input 
                       type="number"
                       min="0"
-                      required
-                      placeholder="1"
+                      placeholder=""
+                      name="tx_orders_count"
+                      id="tx_orders_count"
+                      autoComplete="off"
                       value={formData.orders}
                       onChange={e => handleFormChange({ orders: e.target.value })}
                       className={`w-full px-3.5 py-2.5 bg-slate-50 border border-slate-100 rounded-xl outline-none transition-all font-bold text-slate-800 ${
@@ -2460,8 +2828,10 @@ export default function App() {
                     <input 
                       type="number"
                       min="0"
-                      required
-                      placeholder="1"
+                      placeholder=""
+                      name="tx_items_count"
+                      id="tx_items_count"
+                      autoComplete="off"
                       value={formData.items}
                       onChange={e => handleFormChange({ items: e.target.value })}
                       className={`w-full px-3.5 py-2.5 bg-slate-50 border border-slate-100 rounded-xl outline-none transition-all font-bold text-slate-800 ${
@@ -2470,28 +2840,12 @@ export default function App() {
                     />
                   </div>
 
-                  {/* เลือกรหัสพนักงาน - Half Width */}
+                  {/* รหัสผู้บันทึกข้อมูล (แบบดึงข้อมูลอัตโนมัติจากการล็อกอิน) - Half Width */}
                   <div className="space-y-1.5">
-                    <label className="text-[11px] font-bold text-slate-500 block">👤 รหัสพนักงานผู้คีย์ข้อมูล</label>
-                    <select
-                      value={formData.staffCode}
-                      onChange={e => handleFormChange({ staffCode: e.target.value })}
-                      required
-                      className={`w-full px-3.5 py-2.5 bg-slate-50 border border-slate-100 rounded-xl outline-none transition-all font-bold text-slate-800 ${
-                        formData.platform === 'shopee' ? 'focus:bg-white focus:border-[#F53D2D]' : 'focus:bg-white focus:border-[#2563EB]'
-                      }`}
-                    >
-                      {employeeCodes.length === 0 ? (
-                        <option value="">-- ยังไม่มีรหัสพนักงานในระบบ (กรุณาให้ Admin เพิ่มข้อมูล) --</option>
-                      ) : (
-                        <>
-                          <option value="">-- เลือกรหัสพนักงาน --</option>
-                          {employeeCodes.map(code => (
-                            <option key={code} value={code}>{code}</option>
-                          ))}
-                        </>
-                      )}
-                    </select>
+                    <label className="text-[11px] font-bold text-slate-500 block">👤 บันทึกข้อมูลด้วยบัญชี</label>
+                    <div className="w-full px-3.5 py-2.5 bg-slate-100 border border-slate-200 rounded-xl font-bold text-slate-500 select-none cursor-not-allowed">
+                      {loggedInUserCode || 'Auehen'} (ล็อกอินอัตโนมัติ)
+                    </div>
                   </div>
 
                   {/* หมายเหตุ / ข้อมูลเพิ่มเติม - Full Width */}
@@ -2792,6 +3146,21 @@ export default function App() {
                 /* 1. PASSWORD VERIFICATION FORM */
                 <form onSubmit={handleVerifyPassword} className="space-y-4">
 
+                  {/* ระบุรหัสผู้ใช้งาน */}
+                  <div className="space-y-1.5">
+                    <label className="text-[11px] font-bold text-slate-500 block">
+                      👤 ระบุรหัสผู้ใช้งาน (Enter User ID)
+                    </label>
+                    <input
+                      type="text"
+                      value={selectedUserCode}
+                      onChange={e => setSelectedUserCode(e.target.value)}
+                      required
+                      placeholder="ระบุรหัสผู้ใช้งาน เช่น Auehen, CR-140575..."
+                      className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-100 rounded-xl outline-none focus:bg-white focus:border-indigo-500 transition-all font-bold text-slate-800"
+                    />
+                  </div>
+
                   <div className="space-y-1.5">
                     <label className="text-[11px] font-bold text-slate-500 block">
                       รหัสผ่านความปลอดภัย (Security Password)
@@ -2802,8 +3171,8 @@ export default function App() {
                         value={enteredPassword}
                         onChange={e => setEnteredPassword(e.target.value)}
                         required
-                        placeholder="กรอกรหัสผ่านเพื่อปลดล็อก..."
-                        className={`w-full pl-3.5 pr-10 py-2.5 bg-slate-50 border border-slate-100 rounded-xl outline-none focus:bg-white focus:border-indigo-500 transition-all font-bold text-slate-700 text-center ${enteredPassword.includes('@') ? '' : 'tracking-[0.25em]'}`}
+                        placeholder="กรอกรหัสผ่านเพื่อเข้าสู่ระบบ..."
+                        className={`w-full pl-3.5 pr-10 py-2.5 bg-slate-50 border border-slate-100 rounded-xl outline-none focus:bg-white focus:border-indigo-500 transition-all font-bold text-slate-700 text-center tracking-[0.15em]`}
                         autoFocus
                       />
                       <button
@@ -2816,7 +3185,7 @@ export default function App() {
                     </div>
                     
                     <div className="flex flex-col sm:flex-row sm:items-center sm:justify-end text-[10px] text-slate-400 font-medium px-1 gap-1">
-                      <span className="text-amber-600 font-bold flex items-center gap-0.5">🔒 ต้องกรอกรหัสใหม่ทุกครั้งเพื่อความปลอดภัย</span>
+                      <span className="text-amber-600 font-bold flex items-center gap-0.5">🔒 ต้องกรอกรหัสผ่านเพื่อความปลอดภัย</span>
                     </div>
                   </div>
 
@@ -3064,7 +3433,7 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      {/* STAFF CODES MANAGEMENT MODAL */}
+      {/* USER ACCOUNTS MANAGEMENT MODAL */}
       <AnimatePresence>
         {isEmployeeManagerOpen && (
           <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
@@ -3077,6 +3446,9 @@ export default function App() {
               onClick={() => {
                 setIsEmployeeManagerOpen(false);
                 setNewEmployeeCode('');
+                setNewEmployeePassword('1234');
+                setNewEmployeeRole('user');
+                setConfirmDeleteUserCode(null);
               }}
               className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm"
             />
@@ -3097,10 +3469,10 @@ export default function App() {
                   </div>
                   <div>
                     <h3 className="font-extrabold text-slate-800 text-[15px] tracking-tight">
-                      จัดการรหัสพนักงาน (Staff Code)
+                      จัดการบัญชีผู้ใช้งานระบบ (User Accounts)
                     </h3>
                     <p className="text-[11px] text-slate-400 font-medium">
-                      เพิ่มหรือลบรหัสพนักงานสำหรับเลือกเมื่อทำการคีย์ข้อมูล
+                      เพิ่ม/ลบผู้ใช้งาน และระบุรหัสผ่านรายบุคคลเพื่อความปลอดภัย
                     </p>
                   </div>
                 </div>
@@ -3109,6 +3481,9 @@ export default function App() {
                   onClick={() => {
                     setIsEmployeeManagerOpen(false);
                     setNewEmployeeCode('');
+                    setNewEmployeePassword('1234');
+                    setNewEmployeeRole('user');
+                    setConfirmDeleteUserCode(null);
                   }}
                   className="p-1.5 hover:bg-slate-100 rounded-full transition-all text-slate-400 hover:text-slate-600 cursor-pointer"
                 >
@@ -3116,74 +3491,141 @@ export default function App() {
                 </button>
               </div>
 
-              {/* Add Employee Code Form */}
-              <div className="space-y-2 bg-slate-50 p-4 rounded-2xl border border-slate-100">
+              {/* Add User Form */}
+              <div className="space-y-3 bg-slate-50 p-4 rounded-2xl border border-slate-100">
                 <label className="text-[11px] font-extrabold text-slate-500 block">
-                  เพิ่มรหัสพนักงานใหม่
+                  เพิ่มบัญชีผู้ใช้งานใหม่ (Add User)
                 </label>
-                <div className="flex gap-2">
+                
+                <div className="space-y-2">
                   <input
                     type="text"
                     value={newEmployeeCode}
                     onChange={e => setNewEmployeeCode(e.target.value)}
-                    placeholder="ระบุรหัสพนักงาน เช่น EMP004, ST99"
-                    className="flex-1 px-3.5 py-2.5 bg-white border border-slate-200 rounded-xl outline-none focus:border-indigo-500 transition-all font-semibold text-slate-700 text-sm uppercase"
+                    placeholder="รหัสผู้ใช้งาน / Username เช่น Auehen, CR-140575"
+                    className="w-full px-3.5 py-2.5 bg-white border border-slate-200 rounded-xl outline-none focus:border-indigo-500 transition-all font-semibold text-slate-700 text-sm"
                   />
+                  
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={newEmployeePassword}
+                      onChange={e => setNewEmployeePassword(e.target.value)}
+                      placeholder="กำหนดรหัสผ่าน (Password)"
+                      className="flex-1 px-3.5 py-2 bg-white border border-slate-200 rounded-xl outline-none focus:border-indigo-500 transition-all font-semibold text-slate-700 text-sm"
+                    />
+                    
+                    <select
+                      value={newEmployeeRole}
+                      onChange={e => setNewEmployeeRole(e.target.value as 'user' | 'admin')}
+                      className="px-3 py-2 bg-white border border-slate-200 rounded-xl outline-none focus:border-indigo-500 transition-all font-semibold text-slate-700 text-xs"
+                    >
+                      <option value="user">สิทธิ์ทั่วไป (User)</option>
+                      <option value="admin">ผู้ดูแลระบบ (Admin)</option>
+                    </select>
+                  </div>
+
                   <button
                     type="button"
                     onClick={() => {
-                      const codeToAdd = newEmployeeCode.trim().toUpperCase();
-                      if (!codeToAdd) return;
-
-                      if (employeeCodes.includes(codeToAdd)) {
-                        setToast({ message: '⚠️ รหัสพนักงานนี้มีอยู่ในระบบแล้ว', type: 'error' });
+                      const username = newEmployeeCode.trim();
+                      const password = newEmployeePassword.trim();
+                      if (!username || !password) {
+                        setToast({ message: '⚠️ กรุณาระบุชื่อผู้ใช้งานและรหัสผ่าน', type: 'error' });
                         return;
                       }
 
-                      setEmployeeCodes([...employeeCodes, codeToAdd]);
+                      if (userAccounts.some(acc => acc.userCode.toLowerCase() === username.toLowerCase())) {
+                        setToast({ message: '⚠️ ชื่อผู้ใช้งานนี้มีอยู่ในระบบแล้ว', type: 'error' });
+                        return;
+                      }
+
+                      const updatedAccounts = [
+                        ...userAccounts,
+                        { userCode: username, password, role: newEmployeeRole }
+                      ];
+                      setUserAccounts(updatedAccounts);
                       setNewEmployeeCode('');
-                      setToast({ message: `🎉 เพิ่มรหัสพนักงาน ${codeToAdd} เรียบร้อยแล้ว`, type: 'success' });
+                      setNewEmployeePassword('1234');
+                      setNewEmployeeRole('user');
+                      setToast({ message: `🎉 เพิ่มผู้ใช้งาน ${username} สำเร็จแล้ว`, type: 'success' });
                     }}
-                    className="px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl transition-all shadow-xs flex items-center justify-center cursor-pointer active:scale-95"
+                    className="w-full py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl transition-all shadow-xs flex items-center justify-center gap-1 cursor-pointer active:scale-95"
                   >
-                    เพิ่ม ➕
+                    เพิ่มบัญชีผู้ใช้ใหม่ ➕
                   </button>
                 </div>
               </div>
 
-              {/* Employee Codes List */}
+              {/* User Accounts List */}
               <div className="space-y-2">
                 <label className="text-[11px] font-extrabold text-slate-500 block px-1">
-                  รหัสพนักงานในปัจจุบัน ({employeeCodes.length})
+                  รายชื่อผู้ใช้งานทั้งหมด ({userAccounts.length})
                 </label>
-                {employeeCodes.length === 0 ? (
+                {userAccounts.length === 0 ? (
                   <div className="text-center py-6 text-slate-400 text-xs font-semibold">
-                    ยังไม่มีการเพิ่มรหัสพนักงานใดๆ ในระบบ
+                    ยังไม่มีการเพิ่มบัญชีผู้ใช้งานใดๆ ในระบบ
                   </div>
                 ) : (
                   <div className="max-h-[180px] overflow-y-auto space-y-1.5 pr-1 divide-y divide-slate-100">
-                    {employeeCodes.map((code, idx) => (
-                      <div key={code + idx} className="flex items-center justify-between py-2 px-1 first:pt-0">
-                        <div className="flex items-center gap-2">
-                          <div className="w-2 h-2 rounded-full bg-indigo-500"></div>
-                          <span className="text-slate-700 font-extrabold text-xs font-mono">
-                            {code}
+                    {userAccounts.map((acc, idx) => (
+                      <div key={acc.userCode + idx} className="flex items-center justify-between py-2 px-1 first:pt-0">
+                        <div className="flex flex-col gap-0.5">
+                          <div className="flex items-center gap-2">
+                            <span className="w-2 h-2 rounded-full bg-indigo-500"></span>
+                            <span className="text-slate-800 font-extrabold text-xs">
+                              {acc.userCode}
+                            </span>
+                            <span className={`px-1.5 py-0.5 text-[9px] font-extrabold rounded-md ${
+                              acc.role === 'admin' ? 'bg-rose-50 text-rose-600 border border-rose-100' : 'bg-slate-50 text-slate-500 border border-slate-100'
+                            }`}>
+                              {acc.role === 'admin' ? 'Admin' : 'User'}
+                            </span>
+                          </div>
+                          <span className="text-[10px] text-slate-400 font-mono pl-4">
+                            รหัสผ่าน: <span className="text-indigo-600 font-bold">{acc.password}</span>
                           </span>
                         </div>
                         
-                        {/* Delete Action */}
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const filtered = employeeCodes.filter(c => c !== code);
-                            setEmployeeCodes(filtered);
-                            setToast({ message: `🗑️ ลบรหัสพนักงาน ${code} เรียบร้อยแล้ว`, type: 'info' });
-                          }}
-                          className="p-1.5 hover:bg-red-50 text-slate-400 hover:text-red-500 rounded-lg transition-all cursor-pointer"
-                          title="ลบรหัสพนักงานนี้"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
+                        {/* Delete Action with Confirmation */}
+                        {confirmDeleteUserCode === acc.userCode ? (
+                          <div className="flex items-center gap-1 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const filtered = userAccounts.filter(c => c.userCode !== acc.userCode);
+                                setUserAccounts(filtered);
+                                setToast({ message: `🗑️ ลบบัญชีผู้ใช้ ${acc.userCode} เรียบร้อยแล้ว`, type: 'info' });
+                                setConfirmDeleteUserCode(null);
+                              }}
+                              className="px-2 py-1 bg-rose-600 hover:bg-rose-700 text-white font-extrabold text-[10px] rounded-lg transition-all cursor-pointer active:scale-95 flex items-center gap-0.5"
+                            >
+                              ยืนยันลบ ⚠️
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setConfirmDeleteUserCode(null)}
+                              className="px-2 py-1 bg-slate-100 hover:bg-slate-200 text-slate-500 font-extrabold text-[10px] rounded-lg transition-all cursor-pointer active:scale-95"
+                            >
+                              ยกเลิก
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (acc.userCode === loggedInUserCode) {
+                                setToast({ message: '⚠️ คุณไม่สามารถลบบัญชีผู้ใช้งานที่ตนเองกำลังล็อกอินอยู่ได้', type: 'error' });
+                                return;
+                              }
+                              setConfirmDeleteUserCode(acc.userCode);
+                            }}
+                            className="p-1.5 hover:bg-red-50 text-slate-400 hover:text-red-500 rounded-lg transition-all cursor-pointer"
+                            title="ลบบัญชีผู้ใช้งานนี้"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
                       </div>
                     ))}
                   </div>
@@ -3197,6 +3639,9 @@ export default function App() {
                   onClick={() => {
                     setIsEmployeeManagerOpen(false);
                     setNewEmployeeCode('');
+                    setNewEmployeePassword('1234');
+                    setNewEmployeeRole('user');
+                    setConfirmDeleteUserCode(null);
                   }}
                   className="w-full py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-xl text-xs font-bold transition-all cursor-pointer text-center"
                 >
@@ -3252,15 +3697,15 @@ export default function App() {
                   )}
                   <div>
                     <h3 className="font-extrabold text-slate-800 text-[16px] tracking-tight">
-                      {syncStatus === 'syncing' && '⏳ กำลังซิงค์และบันทึกข้อมูล...'}
-                      {syncStatus === 'success' && '🎉 บันทึกการแก้ไขและอัปเดต Google Sheets สำเร็จ!'}
-                      {syncStatus === 'offline_success' && '💾 บันทึกการแก้ไขในเครื่อง (Local) สำเร็จ!'}
+                      {syncStatus === 'syncing' && (syncSuccessAction === 'delete' ? '⏳ กำลังซิงค์การลบข้อมูล...' : '⏳ กำลังซิงค์และบันทึกข้อมูล...')}
+                      {syncStatus === 'success' && (syncSuccessAction === 'delete' ? '🎉 ลบรายการและอัปเดต Google Sheets สำเร็จ!' : '🎉 บันทึกการแก้ไขและอัปเดต Google Sheets สำเร็จ!')}
+                      {syncStatus === 'offline_success' && (syncSuccessAction === 'delete' ? '💾 ลบรายการในเครื่อง (Local) สำเร็จ!' : '💾 บันทึกการแก้ไขในเครื่อง (Local) สำเร็จ!')}
                       {syncStatus === 'failed' && '⚠️ บันทึกข้อมูลแล้ว แต่การซิงค์ Google Sheets ขัดข้อง'}
                     </h3>
                     <p className="text-[11px] text-slate-400 font-medium">
-                      {syncStatus === 'syncing' && 'ระบบกำลังนำส่งชุดข้อมูลใหม่ไปยังบัญชี Google Sheets ของคุณแบบเรียลไทม์'}
-                      {syncStatus === 'success' && 'อัปเดตฐานข้อมูลและส่งค่าแถวใหม่เข้าสู่แผ่นงานสเปรดชีตเรียบร้อยแล้ว'}
-                      {syncStatus === 'offline_success' && 'บันทึกในระบบเรียบร้อย (รออัปเดตลง Google Sheets เมื่อเชื่อมต่อสถานะผู้ดูแลระบบ)'}
+                      {syncStatus === 'syncing' && (syncSuccessAction === 'delete' ? 'ระบบกำลังอัปเดตสเปรดชีตเพื่อนำรายการนี้ออกอย่างถาวร' : 'ระบบกำลังนำส่งชุดข้อมูลใหม่ไปยังบัญชี Google Sheets ของคุณแบบเรียลไทม์')}
+                      {syncStatus === 'success' && (syncSuccessAction === 'delete' ? 'สเปรดชีตได้รับการลบรายการและจัดเรียงข้อมูลใหม่เสร็จสิ้น' : 'อัปเดตฐานข้อมูลและส่งค่าแถวใหม่เข้าสู่แผ่นงานสเปรดชีตเรียบร้อยแล้ว')}
+                      {syncStatus === 'offline_success' && (syncSuccessAction === 'delete' ? 'ลบรายการออกจากหน่วยความจำโลคัลแล้ว (จะถูกเอาออกจากสเปรดชีตเมื่อกดซิงค์)' : 'บันทึกในระบบเรียบร้อย (รออัปเดตลง Google Sheets เมื่อเชื่อมต่อสถานะผู้ดูแลระบบ)')}
                       {syncStatus === 'failed' && 'ข้อมูลถูกบันทึกในเบราว์เซอร์แล้ว กรุณาตรวจสอบสิทธิ์บัญชีผู้ดูแลระบบของคุณ'}
                     </p>
                   </div>
@@ -3315,9 +3760,16 @@ export default function App() {
               {/* Google Sheets Column Preview Table */}
               <div className="space-y-2">
                 <div className="flex items-center justify-between px-1">
-                  <label className="text-[11px] font-extrabold text-slate-500 block uppercase tracking-wide">
-                    📊 หน้าต่างพรีวิวแถวข้อมูล (Google Sheets Column Row Grid)
-                  </label>
+                  <div className="flex items-center gap-2">
+                    <label className="text-[11px] font-extrabold text-slate-500 block uppercase tracking-wide">
+                      📊 หน้าต่างพรีวิวแถวข้อมูล (Google Sheets Column Row Grid)
+                    </label>
+                    {syncSuccessAction === 'delete' && (
+                      <span className="text-[10px] bg-rose-50 text-rose-600 px-2.5 py-0.5 rounded-full font-extrabold border border-rose-100 animate-pulse">
+                        🗑️ รายการที่ถูกลบออก (Removed Row)
+                      </span>
+                    )}
+                  </div>
                   <span className="text-[10px] bg-slate-100 text-slate-500 px-2 py-0.5 rounded-full font-bold">
                     รูปแบบ AppSheet Schema
                   </span>
@@ -3340,8 +3792,8 @@ export default function App() {
                       </tr>
                     </thead>
                     <tbody>
-                      <tr className="bg-white hover:bg-slate-50/50 transition-colors">
-                        <td className="px-3 py-2.5 border-r border-slate-200 font-bold text-center text-slate-800 bg-indigo-50/10">{syncSuccessModalTx.date}</td>
+                      <tr className={`bg-white hover:bg-slate-50/50 transition-colors ${syncSuccessAction === 'delete' ? 'bg-rose-50/40 line-through text-rose-950/70' : ''}`}>
+                        <td className={`px-3 py-2.5 border-r border-slate-200 font-bold text-center bg-indigo-50/10 ${syncSuccessAction === 'delete' ? 'text-rose-900/60' : 'text-slate-800'}`}>{syncSuccessModalTx.date}</td>
                         <td className="px-3 py-2.5 border-r border-slate-200 text-center font-bold">
                           <span className={`px-2 py-0.5 rounded-md text-[10px] uppercase ${
                             syncSuccessModalTx.platform === 'shopee' ? 'bg-red-50 text-red-600 border border-red-100' : 'bg-blue-50 text-blue-600 border border-blue-100'
@@ -3356,7 +3808,7 @@ export default function App() {
                             {syncSuccessModalTx.type}
                           </span>
                         </td>
-                        <td className="px-3 py-2.5 border-r border-slate-200 text-right font-extrabold text-slate-900 bg-slate-50/20">
+                        <td className={`px-3 py-2.5 border-r border-slate-200 text-right font-extrabold bg-slate-50/20 ${syncSuccessAction === 'delete' ? 'text-rose-900/60' : 'text-slate-900'}`}>
                           ฿{syncSuccessModalTx.amount.toLocaleString('th-TH')}
                         </td>
                         <td className="px-3 py-2.5 border-r border-slate-200 text-center text-slate-400 italic font-normal">
@@ -3369,10 +3821,10 @@ export default function App() {
                           {syncSuccessModalTx.orders}
                         </td>
                         <td className="px-3 py-2.5 border-r border-slate-200 text-center font-extrabold text-slate-700 bg-indigo-50/10">
-                          {syncSuccessModalTx.items || 0}
+                          {syncSuccessModalTx.items !== undefined && !isNaN(syncSuccessModalTx.items) ? syncSuccessModalTx.items : 0}
                         </td>
-                        <td className="px-3 py-2.5 border-r border-slate-200 text-center text-slate-400 text-[10px] font-mono">
-                          {new Date().toISOString().replace('T', ' ').substring(0, 10) + ' ' + new Date().toTimeString().substring(0, 8)}
+                        <td className="px-3 py-2.5 border-r border-slate-200 text-center text-slate-700 text-[11px] font-mono">
+                          {syncSuccessModalTx.timestamp || '-'}
                         </td>
                         <td className="px-3 py-2.5 text-center font-bold text-slate-800 font-mono">
                           {syncSuccessModalTx.staffCode || '-'}

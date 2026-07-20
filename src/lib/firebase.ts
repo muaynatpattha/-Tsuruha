@@ -8,6 +8,7 @@ import {
 } from 'firebase/auth';
 import firebaseConfig from '../../firebase-applet-config.json';
 import { Transaction } from '../types';
+import { getLocalTimestamp } from '../utils';
 
 // Initialize Firebase
 const app = initializeApp(firebaseConfig);
@@ -162,8 +163,9 @@ export async function syncDataToGoogleSheets(
 ): Promise<void> {
   // Let's fetch the first sheet's title dynamically to write directly to it (e.g. Sheet1, ชีต1)
   let sheetTitle = 'Sheet1';
+  let sheetId = 0;
   try {
-    const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}?fields=sheets(properties(title))`, {
+    const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}?fields=sheets(properties(title,sheetId))`, {
       headers: {
         'Authorization': `Bearer ${token}`
       }
@@ -177,6 +179,7 @@ export async function syncDataToGoogleSheets(
       const sheets = data.sheets || [];
       if (sheets.length > 0) {
         sheetTitle = sheets[0].properties.title;
+        sheetId = sheets[0].properties.sheetId || 0;
       }
     }
   } catch (e: any) {
@@ -194,7 +197,6 @@ export async function syncDataToGoogleSheets(
   // Column Headers matching the user's screenshot:
   // Date, Platform, Type, Amount, Order Number, Notes, Quantity, Items, Timestamp, Staff Code
   const txHeaders = ['Date', 'Platform', 'Type', 'Amount', 'Order Number', 'Notes', 'Quantity', 'Items', 'Timestamp', 'Staff Code'];
-  const timestampStr = new Date().toISOString().replace('T', ' ').substring(0, 19);
 
   // Sort transactions by date ascending for Google Sheets sync
   const sortedTransactions = [...transactions].sort((a, b) => a.date.localeCompare(b.date));
@@ -207,8 +209,8 @@ export async function syncDataToGoogleSheets(
     '',                     // Order Number (Left blank)
     tx.note || '',          // Notes
     tx.orders,              // Quantity
-    tx.items || 0,          // Items (จำนวนชิ้น)
-    timestampStr,           // Timestamp
+    tx.items !== undefined && !isNaN(tx.items) ? tx.items : 0, // Items (จำนวนชิ้น)
+    tx.timestamp || `${tx.date} 09:00:00`, // Individual timestamp
     tx.staffCode || ''      // Staff Code
   ]);
   const txData = [txHeaders, ...txRows];
@@ -247,6 +249,84 @@ export async function syncDataToGoogleSheets(
     const errTxt = await writeRes.text();
     throw new Error(`Failed to write values into Google Sheets: ${errTxt}`);
   }
+
+  // Explicitly format Column G (Quantity) and Column H (Items) as standard integer numbers to clear date formatting in Google Sheets
+  try {
+    await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        requests: [
+          {
+            repeatCell: {
+              range: {
+                sheetId: sheetId,
+                startColumnIndex: 6, // Column G (Quantity) is index 6
+                endColumnIndex: 8,   // Column H (Items) is index 7 (exclusive up to index 8)
+                startRowIndex: 1     // Skip header row
+              },
+              cell: {
+                userEnteredFormat: {
+                  numberFormat: {
+                    type: 'NUMBER',
+                    pattern: '0'
+                  }
+                }
+              },
+              fields: 'userEnteredFormat.numberFormat'
+            }
+          }
+        ]
+      })
+    });
+  } catch (formatErr) {
+    console.warn('Failed to format spreadsheet columns G and H:', formatErr);
+  }
+}
+
+// Helper to robustly parse numeric cell values, converting Excel/Google Sheets serial date format strings back to numbers if needed
+function parseNumericCell(val: string | undefined | null, defaultFallback: number = NaN): number {
+  if (val === undefined || val === null) return defaultFallback;
+  const str = val.trim();
+  if (str === '') return defaultFallback;
+
+  // If it's a pure number, return it
+  if (/^\d+$/.test(str)) {
+    return parseInt(str, 10);
+  }
+
+  // If it has decimal point or other clean numeric formats
+  const parsedFloat = parseFloat(str);
+  if (!isNaN(parsedFloat) && /^\d+(\.\d+)?$/.test(str)) {
+    return Math.round(parsedFloat);
+  }
+
+  // If it's a date string (contains "-" or "/")
+  if (str.includes('-') || str.includes('/')) {
+    // Try parsing as a Date
+    const timestamp = Date.parse(str);
+    if (!isNaN(timestamp)) {
+      const d = new Date(timestamp);
+      const year = d.getFullYear();
+      const month = d.getMonth();
+      const date = d.getDate();
+
+      // Excel/Sheets serial date number calculation
+      // Epoch is 1899-12-30. Use UTC calculations to prevent timezone distortion
+      const utcDate = Date.UTC(year, month, date);
+      const utcEpoch = Date.UTC(1899, 11, 30);
+      const diffDays = Math.round((utcDate - utcEpoch) / (1000 * 60 * 60 * 24));
+      
+      if (diffDays > 0 && diffDays < 100000) {
+        return diffDays;
+      }
+    }
+  }
+
+  return isNaN(parsedFloat) ? defaultFallback : Math.round(parsedFloat);
 }
 
 // 5. Read data from Google Sheets to sync back to local storage in real-time
@@ -287,16 +367,30 @@ export async function readDataFromGoogleSheets(
       return [];
     }
 
-    // Header validation
+    // Header validation with extremely robust dual-language (Thai & English) partial-matching
     const headers = rows[0].map((h: string) => h.trim().toLowerCase());
-    const dateIdx = headers.indexOf('date');
-    const platformIdx = headers.indexOf('platform');
-    const typeIdx = headers.indexOf('type');
-    const amountIdx = headers.indexOf('amount');
-    const notesIdx = headers.indexOf('notes');
-    const qtyIdx = headers.indexOf('quantity');
-    const staffIdx = headers.indexOf('staff code');
-    const itemsIdx = headers.indexOf('items');
+    
+    const findHeaderIndex = (searchTerms: string[]): number => {
+      // 1. Try exact or full match
+      let idx = headers.findIndex(h => searchTerms.some(term => h === term));
+      if (idx !== -1) return idx;
+      
+      // 2. Try partial match (substring contains or is contained in)
+      idx = headers.findIndex(h => {
+        return searchTerms.some(term => h.includes(term) || term.includes(h));
+      });
+      return idx;
+    };
+
+    const dateIdx = findHeaderIndex(['date', 'วันที่', 'วัน']);
+    const platformIdx = findHeaderIndex(['platform', 'แพลตฟอร์ม', 'ช่องทาง', 'ระบบ']);
+    const typeIdx = findHeaderIndex(['type', 'ประเภท', 'รายการ']);
+    const amountIdx = findHeaderIndex(['amount', 'จำนวนเงิน', 'ยอดเงิน', 'ยอดขาย', 'เงิน']);
+    const notesIdx = findHeaderIndex(['notes', 'note', 'หมายเหตุ', 'สาเหตุ']);
+    const qtyIdx = findHeaderIndex(['quantity', 'qty', 'จำนวนออเดอร์', 'ออเดอร์']);
+    const staffIdx = findHeaderIndex(['staff code', 'staff', 'employee', 'รหัสพนักงาน', 'พนักงาน']);
+    const itemsIdx = findHeaderIndex(['items', 'item', 'จำนวนชิ้น', 'ชิ้น']);
+    const timestampIdx = findHeaderIndex(['timestamp', 'เวลา', 'ประทับเวลา']);
 
     if (dateIdx === -1 || platformIdx === -1 || typeIdx === -1 || amountIdx === -1) {
       console.warn('Headers mismatch in sheet reading:', headers);
@@ -315,9 +409,12 @@ export async function readDataFromGoogleSheets(
       const rawType = (row[typeIdx] || '').toLowerCase();
       const rawAmount = parseFloat(row[amountIdx]) || 0;
       const rawNotes = notesIdx !== -1 ? (row[notesIdx] || '') : '';
-      const rawQty = qtyIdx !== -1 ? (parseInt(row[qtyIdx], 10) || 1) : 1;
+      const rawQtyVal = qtyIdx !== -1 ? parseNumericCell(row[qtyIdx]) : NaN;
+      const rawQty = isNaN(rawQtyVal) ? (rawType.includes('void') ? 0 : 1) : rawQtyVal;
       const rawStaff = staffIdx !== -1 ? (row[staffIdx] || '') : '';
-      const rawItems = itemsIdx !== -1 ? (parseInt(row[itemsIdx], 10) || rawQty) : rawQty;
+      const rawItemsVal = itemsIdx !== -1 ? parseNumericCell(row[itemsIdx]) : NaN;
+      const rawItems = isNaN(rawItemsVal) ? (rawType.includes('void') ? 0 : 1) : rawItemsVal;
+      const rawTimestamp = timestampIdx !== -1 ? (row[timestampIdx] || '') : '';
 
       const platform: 'shopee' | 'lazada' = rawPlatform.includes('lazada') ? 'lazada' : 'shopee';
       const type: 'sale' | 'void' = rawType.includes('void') ? 'void' : 'sale';
@@ -331,7 +428,8 @@ export async function readDataFromGoogleSheets(
         orders: rawQty,
         items: rawItems,
         note: rawNotes.trim(),
-        staffCode: rawStaff.trim()
+        staffCode: rawStaff.trim(),
+        timestamp: rawTimestamp || `${rawDate.trim()} 09:00:00`
       });
     }
 

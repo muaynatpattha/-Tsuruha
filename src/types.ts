@@ -8,6 +8,7 @@ export interface Transaction {
   items: number; // จำนวนชิ้น
   note: string;
   staffCode?: string;
+  timestamp?: string; // เวลาที่บันทึกหรือแก้ไขรายการ
 }
 
 export interface PlatformSummary {
